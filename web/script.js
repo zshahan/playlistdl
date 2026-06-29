@@ -93,6 +93,103 @@ function closeLoginModal() {
 
 // Check login status, toggle button text, and show/hide admin message
 
+async function loadDownloadOptions() {
+    try {
+        const response = await fetch('/download-options');
+        const data = await response.json();
+        if (data.success) {
+            const select = document.getElementById('downloadPathSelect');
+            const input = document.getElementById('downloadPath');
+            const button = document.getElementById('setPathButton');
+            
+            // Clear existing options
+            select.innerHTML = '';
+            
+            const options = data.options || [];
+            const currentPath = data.current_path;
+            
+            if (options.length > 0) {
+                // Populate dropdown
+                options.forEach(opt => {
+                    const el = document.createElement('option');
+                    el.value = opt.path;
+                    el.innerText = opt.label;
+                    select.appendChild(el);
+                });
+                
+                // Add Custom option
+                const customEl = document.createElement('option');
+                customEl.value = 'custom';
+                customEl.innerText = 'Custom Path...';
+                select.appendChild(customEl);
+                
+                select.style.display = 'inline-block';
+                
+                // Check if currentPath matches one of the option paths
+                const matchingOpt = options.find(opt => opt.path === currentPath);
+                if (matchingOpt) {
+                    select.value = currentPath;
+                    input.style.display = 'none';
+                    button.style.display = 'none';
+                } else {
+                    select.value = 'custom';
+                    input.value = currentPath || '';
+                    input.style.display = 'inline-block';
+                    button.style.display = 'inline-block';
+                }
+            } else {
+                // No options configured, fallback to plain input
+                select.style.display = 'none';
+                input.value = currentPath || '';
+                input.style.display = 'inline-block';
+                button.style.display = 'inline-block';
+            }
+        }
+    } catch (e) {
+        console.error("Error loading download options:", e);
+    }
+}
+
+async function handlePathSelectChange() {
+    const select = document.getElementById('downloadPathSelect');
+    const input = document.getElementById('downloadPath');
+    const button = document.getElementById('setPathButton');
+    const messageDiv = document.getElementById('pathMessage');
+    
+    const val = select.value;
+    if (val === 'custom') {
+        input.style.display = 'inline-block';
+        button.style.display = 'inline-block';
+        messageDiv.innerText = '';
+    } else {
+        input.style.display = 'none';
+        button.style.display = 'none';
+        input.value = val;
+        
+        messageDiv.innerText = "Saving path...";
+        messageDiv.style.color = "yellow";
+        
+        try {
+            const response = await fetch('/set-download-path', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: val})
+            });
+            const data = await response.json();
+            if (data.success) {
+                messageDiv.innerText = `Download path set successfully to: ${data.new_path}`;
+                messageDiv.style.color = "lime";
+            } else {
+                messageDiv.innerText = `Error: ${data.message}`;
+                messageDiv.style.color = "red";
+            }
+        } catch (e) {
+            messageDiv.innerText = `Error saving path: ${e}`;
+            messageDiv.style.color = "red";
+        }
+    }
+}
+
 async function checkLoginStatus() {
     const response = await fetch('/check-login');
     const data = await response.json();
@@ -104,10 +201,17 @@ async function checkLoginStatus() {
         adminButton.innerText = "Log Out";
         adminMessage.style.display = "block";
         adminControls.style.display = "block";
+        await loadDownloadOptions();
     } else {
         adminButton.innerText = "Admin";
         adminMessage.style.display = "none";
         adminControls.style.display = "none";
+        const select = document.getElementById('downloadPathSelect');
+        const input = document.getElementById('downloadPath');
+        const button = document.getElementById('setPathButton');
+        if (select) select.style.display = 'none';
+        if (input) input.style.display = 'inline-block';
+        if (button) button.style.display = 'inline-block';
     }
 }
 
@@ -164,6 +268,7 @@ async function setDownloadPath() {
     if (data.success) {
         messageDiv.innerText = `Download path set successfully to: ${data.new_path}`;
         messageDiv.style.color = "lime";
+        await loadDownloadOptions();
     } else {
         messageDiv.innerText = `Error: ${data.message}`;
         messageDiv.style.color = "red";

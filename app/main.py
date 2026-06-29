@@ -8,12 +8,19 @@ import threading
 import time
 import re  # Add regex for capturing album/playlist name
 
-app = Flask(__name__, static_folder='web')
-BASE_DOWNLOAD_FOLDER = '/app/downloads'
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+STATIC_ROOT = os.path.join(APP_ROOT, 'web')
+if not os.path.isdir(STATIC_ROOT):
+    STATIC_ROOT = os.path.join(os.path.dirname(APP_ROOT), 'web')
+
+app = Flask(__name__, static_folder=STATIC_ROOT)
+BASE_DOWNLOAD_FOLDER = os.getenv('BASE_DOWNLOAD_FOLDER', os.path.join(APP_ROOT, 'downloads'))
 AUDIO_DOWNLOAD_PATH = os.getenv('AUDIO_DOWNLOAD_PATH', BASE_DOWNLOAD_FOLDER)
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 ADMIN_DOWNLOAD_PATH = AUDIO_DOWNLOAD_PATH  # default to .env path
+PORT = int(os.getenv('PORT', '5000'))
+CLEANUP_INTERVAL = int(os.getenv('CLEANUP_INTERVAL', '300'))
 
 sessions = {}
 
@@ -67,11 +74,21 @@ def download_media():
     os.makedirs(temp_download_folder, exist_ok=True)
 
     if "spotify" in spotify_link:
-        command = [
-            'spotdl',
+        audio_providers_env = os.getenv('SPOTDL_AUDIO_PROVIDERS')
+        command = ['spotdl']
+        if audio_providers_env:
+            providers = audio_providers_env.strip().split()
+            command.extend(['--audio'] + providers)
+        
+        extra_args_env = os.getenv('SPOTDL_EXTRA_ARGS')
+        if extra_args_env:
+            command.extend(extra_args_env.strip().split())
+
+        command.extend([
             '--output', f"{temp_download_folder}/{{artist}}/{{album}}/{{title}}.{{output-ext}}",
+            '--',
             spotify_link
-        ]
+        ])
     else:
         command = [
             'yt-dlp', '-x', '--audio-format', 'mp3',
@@ -162,24 +179,29 @@ def generate(is_admin, command, temp_download_folder, session_id):
             encoded_path = quote(relative_path)
             yield f"data: DOWNLOAD: {session_id}/{encoded_path}\n\n"
 
-            # Schedule cleanup of the temp folder
-            threading.Thread(target=delayed_delete, args=(temp_download_folder,)).start()
+        # Schedule cleanup of the temp folder
+        threading.Thread(target=delayed_delete, args=(temp_download_folder,)).start()
 
     except Exception as e:
         yield f"data: Error: {str(e)}\n\n"
 
 
 def delayed_delete(folder_path):
-    time.sleep(300)
+    time.sleep(CLEANUP_INTERVAL)
     shutil.rmtree(folder_path, ignore_errors=True)
 
 def emergency_cleanup_container_downloads():
     print("🚨 Running backup cleanup in /app/downloads")
+    now = time.time()
     for folder in os.listdir(BASE_DOWNLOAD_FOLDER):
         folder_path = os.path.join(BASE_DOWNLOAD_FOLDER, folder)
         try:
-            shutil.rmtree(folder_path)
-            print(f"🗑️ Cleaned: {folder_path}")
+            mtime = os.path.getmtime(folder_path)
+            if now - mtime > CLEANUP_INTERVAL:
+                shutil.rmtree(folder_path)
+                print(f"🗑️ Cleaned: {folder_path}")
+            else:
+                print(f"⏳ Skipping active/recent folder: {folder_path}")
         except Exception as e:
             print(f"⚠️ Could not delete {folder_path}: {e}")
 
@@ -214,6 +236,32 @@ def set_download_path():
     return jsonify({"success": True, "new_path": ADMIN_DOWNLOAD_PATH})
 
 
+@app.route('/download-options')
+def get_download_options():
+    if not is_logged_in():
+        return jsonify({"success": False, "message": "Unauthorized"}), 401
+
+    options_str = os.getenv('DOWNLOAD_OPTIONS', '')
+    options = []
+    for opt in options_str.split(','):
+        opt = opt.strip()
+        if not opt:
+            continue
+        if ':' in opt and not opt.startswith('/'):
+            parts = opt.split(':', 1)
+            label = parts[0].strip()
+            path = parts[1].strip()
+            options.append({"label": label, "path": path})
+        else:
+            options.append({"label": opt, "path": opt})
+
+    return jsonify({
+        "success": True,
+        "options": options,
+        "current_path": ADMIN_DOWNLOAD_PATH
+    })
+
+
 @app.route('/downloads/<session_id>/<path:filename>')
 def serve_download(session_id, filename):
     session_download_folder = os.path.join(BASE_DOWNLOAD_FOLDER, session_id)
@@ -233,5 +281,4 @@ def serve_download(session_id, filename):
 
 schedule_emergency_cleanup()
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
-
+    app.run(host='0.0.0.0', port=PORT)

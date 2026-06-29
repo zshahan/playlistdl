@@ -22,8 +22,9 @@
         <!-- Progress bar -->
         <progress id="progress" value="0" max="100" style="display:none;"></progress>
 	<div id="adminControls" style="display:none;">
+	    <select id="downloadPathSelect" onchange="handlePathSelectChange()" style="display:none;"></select>
     	    <input type="text" id="downloadPath" placeholder="Enter server download path">
-    	    <button onclick="setDownloadPath()">Set Download Path</button>
+    	    <button id="setPathButton" onclick="setDownloadPath()">Set Download Path</button>
     	    <div id="pathMessage"></div>
 	</div>
 

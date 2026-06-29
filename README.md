@@ -34,6 +34,7 @@ services:
 
       - AUDIO_DOWNLOAD_PATH=${AUDIO_DOWNLOAD_PATH}  # Use the env variable
       - CLEANUP_INTERVAL=300  # Optional
+      - DOWNLOAD_OPTIONS=${DOWNLOAD_OPTIONS:-}  # Optional: Comma-separated options
     volumes:
       - ${AUDIO_DOWNLOAD_PATH}:${AUDIO_DOWNLOAD_PATH}  # Reference env variable here as well
 
@@ -53,7 +54,8 @@ services:
    - Click the **Admin** button to log in with your credentials.
    - Once logged in, a message will appear in red indicating, "Now downloading directly to your server!"
    - Enter the playlist or album link as usual, and files will be saved to the designated admin folder on your server.
-   - The UI will also dispaly a text box to input a folder path. This is to alter the path the files are saved to without having to restart the container. The folder can only be changed to another folder within the mounted directory.
+   - If `DOWNLOAD_OPTIONS` are configured, a dropdown menu allows you to choose between predefined folders. Changing the selection automatically updates and saves the path.
+   - Select **Custom Path...** to display a text box where you can manually type a folder path without restarting the container. The folder can only be set to paths within the mounted directory.
 <!--
 3. **Admin Mode**:
    - Click the **Admin** button to log in with your credentials.
@@ -63,9 +65,13 @@ services:
 
 ### Environment Variables
 
-- `CLEANUP_INTERVAL`: (Optional) Sets the cleanup interval for session-based download folders. Defaults to `300` seconds (5 minutes) if not specified.
-- `ADMIN_USERNAME` and `ADMIN_PASSWORD`:(Optional) Sets the login credentials for admin access.
+- `CLEANUP_INTERVAL`: (Optional) Sets the cleanup interval for session-based download folders (both ZIPs and single tracks). Defaults to `300` seconds (5 minutes). Stale folders older than this are also safely swept periodically by a backup job.
+- `ADMIN_USERNAME` and `ADMIN_PASSWORD`: (Optional) Sets the login credentials for admin access.
 - `AUDIO_DOWNLOAD_PATH`: Sets the folder for admin-mode downloads. Files downloaded as an admin are stored here. This is set in your .env file.
+- `DOWNLOAD_OPTIONS`: (Optional) A comma-separated list of folders for the Admin dropdown (e.g. `Pop:/media/...,Rock:/media/...`). Can contain `Label:Path` pairs or simple paths.
+- `SPOTDL_AUDIO_PROVIDERS`: (Optional) Sets the audio provider(s) for spotDL (e.g. `piped`, `youtube`, `soundcloud`, `bandcamp`, `youtube-music`). Space-separated list. If you get blocked by YouTube Music, set this to `piped` or `youtube`.
+- `SPOTDL_EXTRA_ARGS`: (Optional) Extra command-line arguments to pass to `spotdl` (e.g. `--dont-filter-results` to disable strict metadata/title matching filters).
+- `SPOTIPY_CLIENT_ID` and `SPOTIPY_CLIENT_SECRET`: (Optional) If you hit Spotify's rate limits ("Your application has reached a rate/request limit"), you can create an application in the Spotify Developer Dashboard and provide your personal API credentials here to bypass the rate limits.
 
 ## Technical Overview
 
