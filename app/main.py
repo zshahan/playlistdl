@@ -275,29 +275,6 @@ def delayed_delete(folder_path):
     time.sleep(CLEANUP_INTERVAL)
     shutil.rmtree(folder_path, ignore_errors=True)
 
-def emergency_cleanup_container_downloads():
-    print("🚨 Running backup cleanup in /app/downloads")
-    now = time.time()
-    for folder in os.listdir(BASE_DOWNLOAD_FOLDER):
-        folder_path = os.path.join(BASE_DOWNLOAD_FOLDER, folder)
-        try:
-            mtime = os.path.getmtime(folder_path)
-            if now - mtime > CLEANUP_INTERVAL:
-                shutil.rmtree(folder_path)
-                print(f"🗑️ Cleaned: {folder_path}")
-            else:
-                print(f"⏳ Skipping active/recent folder: {folder_path}")
-        except Exception as e:
-            print(f"⚠️ Could not delete {folder_path}: {e}")
-
-def schedule_emergency_cleanup(interval_seconds=3600):
-    def loop():
-        while True:
-            time.sleep(interval_seconds)
-            emergency_cleanup_container_downloads()
-
-    threading.Thread(target=loop, daemon=True).start()
-
 @app.route('/set-download-path', methods=['POST'])
 def set_download_path():
     global ADMIN_DOWNLOAD_PATH
@@ -373,6 +350,5 @@ def log_ytdlp_version():
     print(f"[startup] yt-dlp version: {version}", flush=True)
 
 log_ytdlp_version()
-schedule_emergency_cleanup()
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT)

@@ -43,7 +43,8 @@ async function download() {
             eventSource.close();
             progressBar.style.display = 'none';
         } else if (log.includes("Download completed") || log.includes("Download process completed successfully")) {
-            // Show a success message in logs
+            // Admin downloads finish here instead of a DOWNLOAD: message, so
+            // the bar needs to be completed and closed out the same way.
             logsElement.innerHTML += "Download completed successfully.<br>";
             progressBar.value = 100;
 
