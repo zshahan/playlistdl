@@ -8,6 +8,7 @@ import threading
 import time
 import re  # Add regex for capturing album/playlist name
 import shlex
+import queue
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC_ROOT = os.path.join(APP_ROOT, 'web')
@@ -22,6 +23,12 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 ADMIN_DOWNLOAD_PATH = AUDIO_DOWNLOAD_PATH  # default to .env path
 PORT = int(os.getenv('PORT', '5000'))
 CLEANUP_INTERVAL = int(os.getenv('CLEANUP_INTERVAL', '300'))
+# yt-dlp postprocessing (e.g. ffmpeg splitting a long compilation into one
+# file per chapter) logs once per chapter, not continuously - so a big gap
+# between lines is normal. Only treat it as stuck after this many seconds
+# with zero output, rather than blocking the request forever.
+DOWNLOAD_STALL_TIMEOUT = int(os.getenv('DOWNLOAD_STALL_TIMEOUT', '300'))
+SSE_KEEPALIVE_INTERVAL = 15
 
 sessions = {}
 
@@ -116,13 +123,49 @@ def download_media():
 
 def generate(is_admin, command, temp_download_folder, session_id):
     album_name = None
+    process = None
     try:
         print(f"🎧 Command being run: {' '.join(command)}")
         print(f"📁 Temp download folder: {temp_download_folder}")
 
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        # stdin=DEVNULL so a tool in the chain can never block the whole
+        # request by silently waiting on an interactive prompt.
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, text=True,
+        )
 
-        for line in process.stdout:
+        # Read the subprocess output on a background thread so this generator
+        # can keep polling with a timeout - that lets it send SSE keepalives
+        # (so proxies/idle connections don't kill a slow-but-alive download)
+        # and detect a genuinely stuck subprocess instead of hanging forever.
+        line_queue = queue.Queue()
+
+        def read_output():
+            try:
+                for line in process.stdout:
+                    line_queue.put(line)
+            finally:
+                line_queue.put(None)  # sentinel: subprocess stdout closed
+
+        threading.Thread(target=read_output, daemon=True).start()
+
+        last_output_time = time.time()
+        stalled = False
+        while True:
+            try:
+                line = line_queue.get(timeout=SSE_KEEPALIVE_INTERVAL)
+            except queue.Empty:
+                if time.time() - last_output_time > DOWNLOAD_STALL_TIMEOUT:
+                    stalled = True
+                    break
+                yield ": keepalive\n\n"
+                continue
+
+            if line is None:
+                break
+
+            last_output_time = time.time()
             print(f"▶️ {line.strip()}")
             yield f"data: {line.strip()}\n\n"
 
@@ -131,7 +174,12 @@ def generate(is_admin, command, temp_download_folder, session_id):
             if match:
                 album_name = match.group(1).strip()
 
-        process.stdout.close()
+        if stalled:
+            process.kill()
+            process.wait()
+            yield f"data: Error: Download produced no output for {DOWNLOAD_STALL_TIMEOUT}s and was aborted.\n\n"
+            return
+
         process.wait()
 
         if process.returncode != 0:
@@ -212,6 +260,15 @@ def generate(is_admin, command, temp_download_folder, session_id):
 
     except Exception as e:
         yield f"data: Error: {str(e)}\n\n"
+    finally:
+        # Covers the client-disconnect case too: Flask raises GeneratorExit
+        # into this generator at its current yield, which lands here.
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if process.stdout:
+                process.stdout.close()
 
 
 def delayed_delete(folder_path):

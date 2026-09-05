@@ -47,6 +47,10 @@ async function download() {
             // the bar needs to be completed and closed out the same way.
             logsElement.innerHTML += "Download completed successfully.<br>";
             progressBar.value = 100;
+
+            // Close the EventSource now - otherwise the browser treats the
+            // server ending the stream as a dropped connection and silently
+            // reconnects, kicking off a duplicate download.
             eventSource.close();
             progressBar.style.display = 'none';
         } else if (log.startsWith("Error")) {

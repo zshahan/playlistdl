@@ -68,6 +68,8 @@ services:
 
 ### Environment Variables
 
+- `CLEANUP_INTERVAL`: (Optional) Sets the cleanup interval for session-based download folders (both ZIPs and single tracks). Defaults to `300` seconds (5 minutes). Stale folders older than this are also safely swept periodically by a backup job.
+- `DOWNLOAD_STALL_TIMEOUT`: (Optional) Seconds of complete silence from `yt-dlp`/`spotdl` (no new log lines) before an in-progress download is aborted and reported as failed. Defaults to `300` (5 minutes). Guards against a hung download (e.g. a chapter-splitting step that gets stuck) blocking the request forever instead of surfacing an error.
 - `CLEANUP_INTERVAL`: (Optional) How long a completed public download's ZIP/track stays available before its temporary folder is deleted. Defaults to `300` seconds (5 minutes).
 - `ADMIN_USERNAME` and `ADMIN_PASSWORD`: (Optional) Sets the login credentials for admin access.
 - `AUDIO_DOWNLOAD_PATH`: Sets the folder for admin-mode downloads. Files downloaded as an admin are stored here. This is set in your .env file.
@@ -96,6 +98,7 @@ services:
 - **Permissions**: Ensure the `downloads` directory has the correct permissions for Docker to write files. If files land owned by root and another system can't read them without a manual `chown`/`chmod`, set `PUID`/`PGID` (see Environment Variables) to the uid/gid that system expects.
 - **Port Conflicts**: If port 5000 is in use, adjust the port mapping in the `docker-compose.yaml` file.
 - **YouTube downloads failing (e.g. "The page needs to be reloaded")**: This means `yt-dlp` has fallen behind a YouTube change. The image is rebuilt weekly (and on every push to `master`) with `yt-dlp` forced to its latest release, so `docker compose pull && docker compose up -d` usually resolves it. Check `docker logs playlistdl` at startup for the `[startup] yt-dlp version: ...` line to confirm what's actually running. If YouTube breaks something yt-dlp hasn't shipped a fix for yet, `YTDLP_EXTRA_ARGS` (see Environment Variables) lets you try a workaround without rebuilding.
+- **"Error occurred while downloading" even though `docker logs playlistdl` shows the download and audio extraction finished**: The web UI shows this generic message whenever the browser's connection drops instead of receiving a clean success/error response - it doesn't necessarily mean `yt-dlp` failed. This can happen if a long chapter-splitting step (e.g. a large DJ mix/compilation with many chapters) goes quiet for a while and something between the browser and the server (a reverse proxy, VPN, etc.) times out the idle connection. The app now sends periodic keepalives during silent stretches and only gives up (killing the download and reporting a clear error) after `DOWNLOAD_STALL_TIMEOUT` seconds of true silence, so a genuine hang is reported explicitly instead of just going quiet. If you still hit this, check the container logs for what actually happened around that time.
 
 ## Support This Project
 
