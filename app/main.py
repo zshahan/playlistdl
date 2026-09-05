@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import re  # Add regex for capturing album/playlist name
+import shlex
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC_ROOT = os.path.join(APP_ROOT, 'web')
@@ -82,7 +83,7 @@ def download_media():
         
         extra_args_env = os.getenv('SPOTDL_EXTRA_ARGS')
         if extra_args_env:
-            command.extend(extra_args_env.strip().split())
+            command.extend(shlex.split(extra_args_env))
 
         command.extend([
             '--output', f"{temp_download_folder}/{{artist}}/{{album}}/{{title}}.{{output-ext}}",
@@ -90,11 +91,16 @@ def download_media():
             spotify_link
         ])
     else:
-        command = [
-            'yt-dlp', '-x', '--audio-format', 'mp3',
+        command = ['yt-dlp', '-x', '--audio-format', 'mp3']
+
+        ytdlp_extra_args_env = os.getenv('YTDLP_EXTRA_ARGS')
+        if ytdlp_extra_args_env:
+            command.extend(shlex.split(ytdlp_extra_args_env))
+
+        command.extend([
             '-o', f"{temp_download_folder}/%(uploader)s/%(album)s/%(title)s.%(ext)s",
             spotify_link
-        ]
+        ])
 
     is_admin = is_logged_in()
     return Response(generate(is_admin, command, temp_download_folder, session_id), mimetype='text/event-stream')
@@ -279,6 +285,15 @@ def serve_download(session_id, filename):
 
     return send_from_directory(session_download_folder, filename, as_attachment=True)
 
+def log_ytdlp_version():
+    try:
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=10, check=True)
+        version = result.stdout.strip()
+    except Exception as e:
+        version = f'unknown ({e})'
+    print(f"[startup] yt-dlp version: {version}", flush=True)
+
+log_ytdlp_version()
 schedule_emergency_cleanup()
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT)

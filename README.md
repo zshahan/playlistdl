@@ -23,7 +23,7 @@ A self-hosted web application for downloading songs, albums, or playlists from S
 ```yaml
 services:
   playlistdl:
-    image: tanner23456/playlistdl:v2
+    image: ghcr.io/zshahan/playlistdl:latest
     container_name: playlistdl
     ports:
       - "4827:5000"
@@ -71,6 +71,7 @@ services:
 - `DOWNLOAD_OPTIONS`: (Optional) A comma-separated list of folders for the Admin dropdown (e.g. `Pop:/media/...,Rock:/media/...`). Can contain `Label:Path` pairs or simple paths.
 - `SPOTDL_AUDIO_PROVIDERS`: (Optional) Sets the audio provider(s) for spotDL (e.g. `piped`, `youtube`, `soundcloud`, `bandcamp`, `youtube-music`). Space-separated list. If you get blocked by YouTube Music, set this to `piped` or `youtube`.
 - `SPOTDL_EXTRA_ARGS`: (Optional) Extra command-line arguments to pass to `spotdl` (e.g. `--dont-filter-results` to disable strict metadata/title matching filters).
+- `YTDLP_EXTRA_ARGS`: (Optional) Extra command-line arguments to pass to `yt-dlp` for direct YouTube links (e.g. `--extractor-args "youtube:player_client=default,mweb"` as a workaround if YouTube breaks extraction again before the next image rebuild). Parsed with shell-style quoting, so arguments containing spaces must be quoted.
 - `SPOTIPY_CLIENT_ID` and `SPOTIPY_CLIENT_SECRET`: (Optional) If you hit Spotify's rate limits ("Your application has reached a rate/request limit"), you can create an application in the Spotify Developer Dashboard and provide your personal API credentials here to bypass the rate limits.
 
 ## Technical Overview
@@ -90,6 +91,7 @@ services:
 
 - **Permissions**: Ensure the `downloads` directory has the correct permissions for Docker to write files.
 - **Port Conflicts**: If port 5000 is in use, adjust the port mapping in the `docker-compose.yaml` file.
+- **YouTube downloads failing (e.g. "The page needs to be reloaded")**: This means `yt-dlp` has fallen behind a YouTube change. The image is rebuilt weekly (and on every push to `master`) with `yt-dlp` forced to its latest release, so `docker compose pull && docker compose up -d` usually resolves it. Check `docker logs playlistdl` at startup for the `[startup] yt-dlp version: ...` line to confirm what's actually running. If YouTube breaks something yt-dlp hasn't shipped a fix for yet, `YTDLP_EXTRA_ARGS` (see Environment Variables) lets you try a workaround without rebuilding.
 
 ## Support This Project
 
