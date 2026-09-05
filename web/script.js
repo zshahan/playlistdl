@@ -1,5 +1,9 @@
 console.log("Script loaded"); // Add this line at the beginning of script.js
 
+// Job backing the in-flight download, if any - lets the Cancel button
+// reach the right job on the server-side queue.
+let currentJobId = null;
+
 async function download() {
     const spotifyLink = document.getElementById('spotifyLink').value;
 
@@ -19,8 +23,29 @@ async function download() {
     progressBar.value = 0;
     const increment = 10; // Smaller increment for more gradual progress
 
+    currentJobId = null;
+    const cancelButton = document.getElementById('cancelButton');
+    cancelButton.style.display = 'inline-block';
+    cancelButton.disabled = false;
+
     // Create an EventSource to listen to the server-sent events
     const eventSource = new EventSource(`/download?spotify_link=${encodeURIComponent(spotifyLink)}`);
+
+    // Sent once, right when the job is created, so Cancel has something to
+    // target even before any log lines arrive (e.g. while still queued).
+    eventSource.addEventListener('job', function(event) {
+        currentJobId = event.data;
+    });
+
+    function stopWatching() {
+        eventSource.close();
+        progressBar.style.display = 'none';
+        cancelButton.style.display = 'none';
+        currentJobId = null;
+        if (document.getElementById('adminControls').style.display !== 'none') {
+            refreshJobQueue();
+        }
+    }
 
     eventSource.onmessage = function(event) {
         const log = event.data;
@@ -40,8 +65,7 @@ async function download() {
             document.getElementById('result').appendChild(downloadLink);
 
             // Close the EventSource and hide the progress bar
-            eventSource.close();
-            progressBar.style.display = 'none';
+            stopWatching();
         } else if (log.includes("Download completed") || log.includes("Download process completed successfully")) {
             // Admin downloads finish here instead of a DOWNLOAD: message, so
             // the bar needs to be completed and closed out the same way.
@@ -51,13 +75,11 @@ async function download() {
             // Close the EventSource now - otherwise the browser treats the
             // server ending the stream as a dropped connection and silently
             // reconnects, kicking off a duplicate download.
-            eventSource.close();
-            progressBar.style.display = 'none';
-        } else if (log.startsWith("Error")) {
-            // Display error message and close EventSource
-            document.getElementById('result').innerText = `Error: ${log}`;
-            eventSource.close();
-            progressBar.style.display = 'none';
+            stopWatching();
+        } else if (log.startsWith("Error") || log.includes("Job killed by user request") || log.includes("Job removed from queue")) {
+            // Display error/cancellation message and close EventSource
+            document.getElementById('result').innerText = log.startsWith("Error") ? `Error: ${log}` : log;
+            stopWatching();
         } else {
             // Increase progress gradually
             progressBar.value = Math.min(progressBar.value + increment, 95);
@@ -73,9 +95,31 @@ async function download() {
         if (!logsElement.innerHTML.includes("Download completed successfully")) {
             document.getElementById('result').innerText = "Error occurred while downloading.";
         }
-        progressBar.style.display = 'none';
-        eventSource.close();
+        stopWatching();
     };
+}
+
+// Cancels the download currently being watched: removes it if it's still
+// waiting in the queue, or kills its process if it has already started.
+async function cancelDownload() {
+    if (!currentJobId) return;
+    const cancelButton = document.getElementById('cancelButton');
+    cancelButton.disabled = true;
+    try {
+        let response = await fetch(`/jobs/${currentJobId}`, { method: 'DELETE' });
+        let data = await response.json();
+        if (!data.success) {
+            response = await fetch(`/jobs/${currentJobId}/kill`, { method: 'POST' });
+            data = await response.json();
+        }
+        if (!data.success) {
+            console.error("Could not cancel job:", data.message);
+        }
+    } catch (e) {
+        console.error("Cancel failed:", e);
+    } finally {
+        cancelButton.disabled = false;
+    }
 }
 // Function to handle the Admin / Log Out button behavior
 function handleAdminButton() {
@@ -209,6 +253,7 @@ async function checkLoginStatus() {
         adminMessage.style.display = "block";
         adminControls.style.display = "block";
         await loadDownloadOptions();
+        startJobQueuePolling();
     } else {
         adminButton.innerText = "Admin";
         adminMessage.style.display = "none";
@@ -219,7 +264,96 @@ async function checkLoginStatus() {
         if (select) select.style.display = 'none';
         if (input) input.style.display = 'inline-block';
         if (button) button.style.display = 'inline-block';
+        stopJobQueuePolling();
     }
+}
+
+// --- Admin job queue panel -------------------------------------------
+
+let jobQueuePollHandle = null;
+
+function startJobQueuePolling() {
+    if (jobQueuePollHandle) return;
+    refreshJobQueue();
+    jobQueuePollHandle = setInterval(refreshJobQueue, 4000);
+}
+
+function stopJobQueuePolling() {
+    if (jobQueuePollHandle) {
+        clearInterval(jobQueuePollHandle);
+        jobQueuePollHandle = null;
+    }
+}
+
+function formatJobTime(epochSeconds) {
+    if (!epochSeconds) return '-';
+    return new Date(epochSeconds * 1000).toLocaleTimeString();
+}
+
+async function refreshJobQueue() {
+    const tbody = document.querySelector('#jobQueueTable tbody');
+    if (!tbody) return;
+
+    try {
+        const response = await fetch('/jobs');
+        const data = await response.json();
+        if (!data.success) return;
+
+        tbody.innerHTML = '';
+        data.jobs.forEach(job => {
+            const row = document.createElement('tr');
+
+            const linkCell = document.createElement('td');
+            linkCell.textContent = job.link && job.link.length > 45 ? job.link.slice(0, 45) + '…' : job.link;
+            linkCell.title = job.link || '';
+            row.appendChild(linkCell);
+
+            const statusCell = document.createElement('td');
+            statusCell.textContent = job.status;
+            statusCell.className = `job-status job-status-${job.status}`;
+            row.appendChild(statusCell);
+
+            const startedCell = document.createElement('td');
+            startedCell.textContent = formatJobTime(job.started_at);
+            row.appendChild(startedCell);
+
+            const actionsCell = document.createElement('td');
+            if (job.status === 'queued') {
+                const removeBtn = document.createElement('button');
+                removeBtn.textContent = 'Remove';
+                removeBtn.onclick = () => removeQueuedJob(job.id);
+                actionsCell.appendChild(removeBtn);
+            } else if (job.status === 'running') {
+                const killBtn = document.createElement('button');
+                killBtn.textContent = 'Kill';
+                killBtn.onclick = () => killRunningJob(job.id);
+                actionsCell.appendChild(killBtn);
+            }
+            row.appendChild(actionsCell);
+
+            tbody.appendChild(row);
+        });
+    } catch (e) {
+        console.error("Error loading job queue:", e);
+    }
+}
+
+async function removeQueuedJob(jobId) {
+    try {
+        await fetch(`/jobs/${jobId}`, { method: 'DELETE' });
+    } catch (e) {
+        console.error("Error removing job:", e);
+    }
+    refreshJobQueue();
+}
+
+async function killRunningJob(jobId) {
+    try {
+        await fetch(`/jobs/${jobId}/kill`, { method: 'POST' });
+    } catch (e) {
+        console.error("Error killing job:", e);
+    }
+    refreshJobQueue();
 }
 
 

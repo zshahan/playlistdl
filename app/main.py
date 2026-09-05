@@ -9,6 +9,9 @@ import time
 import re  # Add regex for capturing album/playlist name
 import shlex
 import queue
+from urllib.parse import quote
+
+from job_queue import JobQueue, JobStatus
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC_ROOT = os.path.join(APP_ROOT, 'web')
@@ -29,8 +32,16 @@ CLEANUP_INTERVAL = int(os.getenv('CLEANUP_INTERVAL', '300'))
 # with zero output, rather than blocking the request forever.
 DOWNLOAD_STALL_TIMEOUT = int(os.getenv('DOWNLOAD_STALL_TIMEOUT', '300'))
 SSE_KEEPALIVE_INTERVAL = 15
+# How often a running job's executor wakes up to notice a kill request or
+# the stall timeout - independent of the SSE keepalive cadence above, which
+# is about the HTTP connection rather than the job itself.
+JOB_POLL_INTERVAL = 1
+# How many downloads run at once; extra requests wait in the queue instead
+# of all spawning spotdl/yt-dlp simultaneously.
+MAX_CONCURRENT_JOBS = max(1, int(os.getenv('MAX_CONCURRENT_JOBS', '2')))
 
 sessions = {}
+job_queue = JobQueue(max_workers=MAX_CONCURRENT_JOBS)
 
 os.makedirs(BASE_DOWNLOAD_FOLDER, exist_ok=True)
 
@@ -77,17 +88,19 @@ def download_media():
     if not spotify_link:
         return jsonify({"status": "error", "output": "No link provided"}), 400
 
-    session_id = str(uuid.uuid4())
-    temp_download_folder = os.path.join(BASE_DOWNLOAD_FOLDER, session_id)
-    os.makedirs(temp_download_folder, exist_ok=True)
+    is_admin = is_logged_in()
+    job = create_download_job(spotify_link, is_admin)
+    return Response(stream_job_log(job), mimetype='text/event-stream')
 
-    if "spotify" in spotify_link:
+
+def build_download_command(link, temp_download_folder):
+    if "spotify" in link:
         audio_providers_env = os.getenv('SPOTDL_AUDIO_PROVIDERS')
         command = ['spotdl']
         if audio_providers_env:
             providers = audio_providers_env.strip().split()
             command.extend(['--audio'] + providers)
-        
+
         extra_args_env = os.getenv('SPOTDL_EXTRA_ARGS')
         if extra_args_env:
             command.extend(shlex.split(extra_args_env))
@@ -95,14 +108,15 @@ def download_media():
         command.extend([
             '--output', f"{temp_download_folder}/{{artist}}/{{album}}/{{title}}.{{output-ext}}",
             '--',
-            spotify_link
+            link
         ])
     else:
         # Chapters (e.g. DJ mixes, compilation uploads) split into one file
         # per track via ffmpeg. Videos with no chapters produce only the
         # "default" file below - it's written to a sibling -raw folder and
-        # generate() moves it into temp_download_folder only if no chapter
-        # files showed up, so a single track still gets served normally.
+        # execute_download_job() moves it into temp_download_folder only if
+        # no chapter files showed up, so a single track still gets served
+        # normally.
         raw_dir = f"{temp_download_folder}-raw"
         os.makedirs(raw_dir, exist_ok=True)
 
@@ -115,13 +129,70 @@ def download_media():
         command.extend([
             '-o', f"{raw_dir}/%(uploader)s - %(title)s.%(ext)s",
             '-o', f"chapter:{temp_download_folder}/%(uploader)s - %(title)s/%(section_number)03d - %(section_title)s.%(ext)s",
-            spotify_link
+            link
         ])
+    return command
 
-    is_admin = is_logged_in()
-    return Response(generate(is_admin, command, temp_download_folder, session_id), mimetype='text/event-stream')
 
-def generate(is_admin, command, temp_download_folder, session_id):
+def create_download_job(link, is_admin):
+    """Build the download command and hand it to the job queue. The job id
+    doubles as the session id for the temp download folder / download URL,
+    same role the old ad-hoc session_id played."""
+    session_id = str(uuid.uuid4())
+    temp_download_folder = os.path.join(BASE_DOWNLOAD_FOLDER, session_id)
+    os.makedirs(temp_download_folder, exist_ok=True)
+
+    command = build_download_command(link, temp_download_folder)
+    metadata = {
+        "link": link,
+        "is_admin": is_admin,
+        "command": command,
+        "temp_download_folder": temp_download_folder,
+    }
+    job = job_queue.submit(execute_download_job, metadata=metadata, job_id=session_id)
+
+    if job.status == JobStatus.QUEUED:
+        position = job_queue.queue_position(job.id)
+        if position and position > 1:
+            job.log(f"Queued for download (position {position})...")
+        else:
+            job.log("Waiting for a free download slot...")
+
+    return job
+
+
+def stream_job_log(job):
+    """SSE stream that tails a job's log: past lines first, then live ones,
+    with periodic keepalives so idle proxies don't drop the connection.
+    Unlike the old request-scoped generator, closing this stream (the
+    browser tab, a dropped connection) does NOT stop the job - it keeps
+    running in the background and can be re-attached to or managed via the
+    /jobs endpoints below."""
+    yield f"event: job\ndata: {job.id}\n\n"
+
+    log_queue = job.subscribe()
+    try:
+        while True:
+            try:
+                line = log_queue.get(timeout=SSE_KEEPALIVE_INTERVAL)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+
+            if line is None:
+                break
+
+            yield f"data: {line}\n\n"
+    finally:
+        job.unsubscribe(log_queue)
+
+
+def execute_download_job(job):
+    command = job.metadata["command"]
+    temp_download_folder = job.metadata["temp_download_folder"]
+    is_admin = job.metadata["is_admin"]
+    session_id = job.id
+
     album_name = None
     process = None
     try:
@@ -129,16 +200,19 @@ def generate(is_admin, command, temp_download_folder, session_id):
         print(f"📁 Temp download folder: {temp_download_folder}")
 
         # stdin=DEVNULL so a tool in the chain can never block the whole
-        # request by silently waiting on an interactive prompt.
+        # job by silently waiting on an interactive prompt.
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, text=True,
         )
+        job.process = process
+        if job.kill_requested:
+            process.kill()
 
-        # Read the subprocess output on a background thread so this generator
-        # can keep polling with a timeout - that lets it send SSE keepalives
-        # (so proxies/idle connections don't kill a slow-but-alive download)
-        # and detect a genuinely stuck subprocess instead of hanging forever.
+        # Read the subprocess output on a background thread so this loop can
+        # keep polling with a short timeout - that's what lets it notice a
+        # kill request or a genuinely stuck subprocess without blocking on
+        # I/O for the full stall timeout.
         line_queue = queue.Queue()
 
         def read_output():
@@ -154,12 +228,13 @@ def generate(is_admin, command, temp_download_folder, session_id):
         stalled = False
         while True:
             try:
-                line = line_queue.get(timeout=SSE_KEEPALIVE_INTERVAL)
+                line = line_queue.get(timeout=JOB_POLL_INTERVAL)
             except queue.Empty:
+                if job.kill_requested:
+                    break
                 if time.time() - last_output_time > DOWNLOAD_STALL_TIMEOUT:
                     stalled = True
                     break
-                yield ": keepalive\n\n"
                 continue
 
             if line is None:
@@ -167,27 +242,41 @@ def generate(is_admin, command, temp_download_folder, session_id):
 
             last_output_time = time.time()
             print(f"▶️ {line.strip()}")
-            yield f"data: {line.strip()}\n\n"
+            job.log(line.strip())
 
             # Capture album name for zipping later
             match = re.search(r'Found \d+ songs in (.+?) \(', line)
             if match:
                 album_name = match.group(1).strip()
 
+        if job.kill_requested:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            job.log("Job killed by user request.")
+            shutil.rmtree(temp_download_folder, ignore_errors=True)
+            shutil.rmtree(f"{temp_download_folder}-raw", ignore_errors=True)
+            job.finish(JobStatus.KILLED, error="Killed by user request.")
+            return
+
         if stalled:
             process.kill()
             process.wait()
-            yield f"data: Error: Download produced no output for {DOWNLOAD_STALL_TIMEOUT}s and was aborted.\n\n"
+            error = f"Download produced no output for {DOWNLOAD_STALL_TIMEOUT}s and was aborted."
+            job.log(f"Error: {error}")
+            job.finish(JobStatus.FAILED, error=error)
             return
 
         process.wait()
 
         if process.returncode != 0:
-            yield f"data: Error: Download exited with code {process.returncode}.\n\n"
+            error = f"Download exited with code {process.returncode}."
+            job.log(f"Error: {error}")
+            job.finish(JobStatus.FAILED, error=error)
             return
 
-        # Reconcile the yt-dlp -raw sibling folder (see download_media): if
-        # chapters were split into temp_download_folder, discard the raw
+        # Reconcile the yt-dlp -raw sibling folder (see build_download_command):
+        # if chapters were split into temp_download_folder, discard the raw
         # whole-file copy; otherwise it's the only output, so promote it.
         raw_dir = f"{temp_download_folder}-raw"
         if os.path.isdir(raw_dir):
@@ -210,7 +299,9 @@ def generate(is_admin, command, temp_download_folder, session_id):
         valid_audio_files = [f for f in downloaded_files if f.lower().endswith(('.mp3', '.m4a', '.flac', '.wav', '.ogg'))]
 
         if not valid_audio_files:
-            yield f"data: Error: No valid audio files found. Please check the link.\n\n"
+            error = "No valid audio files found. Please check the link."
+            job.log(f"Error: {error}")
+            job.finish(JobStatus.FAILED, error=error)
             return
 
         # ✅ ADMIN HANDLING
@@ -235,7 +326,8 @@ def generate(is_admin, command, temp_download_folder, session_id):
 
 
             shutil.rmtree(temp_download_folder, ignore_errors=True)
-            yield "data: Download completed. Files saved to server directory.\n\n"
+            job.log("Download completed. Files saved to server directory.")
+            job.finish(JobStatus.COMPLETED)
             return  # ✅ Don’t try to serve/move anything else
 
         # ✅ PUBLIC USER HANDLING
@@ -247,22 +339,22 @@ def generate(is_admin, command, temp_download_folder, session_id):
                     arcname = os.path.relpath(file_path, start=temp_download_folder)
                     zipf.write(file_path, arcname=arcname)
 
-            yield f"data: DOWNLOAD: {session_id}/{zip_filename}\n\n"
+            job.log(f"DOWNLOAD: {session_id}/{zip_filename}")
 
         else:
-            from urllib.parse import quote
             relative_path = os.path.relpath(valid_audio_files[0], start=temp_download_folder)
             encoded_path = quote(relative_path)
-            yield f"data: DOWNLOAD: {session_id}/{encoded_path}\n\n"
+            job.log(f"DOWNLOAD: {session_id}/{encoded_path}")
+
+        job.finish(JobStatus.COMPLETED)
 
         # Schedule cleanup of the temp folder
         threading.Thread(target=delayed_delete, args=(temp_download_folder,)).start()
 
     except Exception as e:
-        yield f"data: Error: {str(e)}\n\n"
+        job.log(f"Error: {str(e)}")
+        job.finish(JobStatus.FAILED, error=str(e))
     finally:
-        # Covers the client-disconnect case too: Flask raises GeneratorExit
-        # into this generator at its current yield, which lands here.
         if process is not None:
             if process.poll() is None:
                 process.kill()
@@ -274,6 +366,67 @@ def generate(is_admin, command, temp_download_folder, session_id):
 def delayed_delete(folder_path):
     time.sleep(CLEANUP_INTERVAL)
     shutil.rmtree(folder_path, ignore_errors=True)
+
+
+def job_summary(job):
+    summary = job.to_dict()
+    summary["link"] = job.metadata.get("link")
+    summary["is_admin"] = job.metadata.get("is_admin", False)
+    return summary
+
+
+@app.route('/jobs')
+def list_jobs():
+    # Listing reveals every job's id and link, which the id-scoped endpoints
+    # below then let you kill/remove - so unlike those, this needs admin.
+    if not is_logged_in():
+        return jsonify({"success": False, "message": "Unauthorized"}), 401
+    return jsonify({"success": True, "jobs": [job_summary(j) for j in job_queue.list()]})
+
+
+@app.route('/jobs/<job_id>')
+def get_job(job_id):
+    job = job_queue.get(job_id)
+    if job is None:
+        return jsonify({"success": False, "message": "Job not found"}), 404
+    detail = job_summary(job)
+    detail["log"] = job.get_log()
+    return jsonify({"success": True, "job": detail})
+
+
+@app.route('/jobs/<job_id>/stream')
+def stream_job(job_id):
+    job = job_queue.get(job_id)
+    if job is None:
+        return jsonify({"success": False, "message": "Job not found"}), 404
+    return Response(stream_job_log(job), mimetype='text/event-stream')
+
+
+@app.route('/jobs/<job_id>', methods=['DELETE'])
+def remove_job(job_id):
+    job = job_queue.get(job_id)
+    if job is None:
+        return jsonify({"success": False, "message": "Job not found"}), 404
+    ok, message = job_queue.remove(job_id)
+    if not ok:
+        return jsonify({"success": False, "message": message}), 409
+    temp_download_folder = job.metadata.get("temp_download_folder")
+    if temp_download_folder:
+        shutil.rmtree(temp_download_folder, ignore_errors=True)
+        shutil.rmtree(f"{temp_download_folder}-raw", ignore_errors=True)
+    return jsonify({"success": True})
+
+
+@app.route('/jobs/<job_id>/kill', methods=['POST'])
+def kill_job(job_id):
+    job = job_queue.get(job_id)
+    if job is None:
+        return jsonify({"success": False, "message": "Job not found"}), 404
+    ok, message = job_queue.kill(job_id)
+    if not ok:
+        return jsonify({"success": False, "message": message}), 409
+    return jsonify({"success": True})
+
 
 @app.route('/set-download-path', methods=['POST'])
 def set_download_path():
@@ -351,4 +504,9 @@ def log_ytdlp_version():
 
 log_ytdlp_version()
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT)
+    # threaded=True: downloads run on the job queue's own worker threads
+    # regardless, but the dev server itself defaults to handling one HTTP
+    # connection at a time - without this, a single open download's SSE
+    # stream would block every other request (job listing, another user's
+    # download) until it closed.
+    app.run(host='0.0.0.0', port=PORT, threaded=True)

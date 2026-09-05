@@ -11,6 +11,7 @@ A self-hosted web application for downloading songs, albums, or playlists from S
 - **Progress bar and download logs**: View download progress and logs in real-time via the web interface.
 - **Auto-cleanup**: Deletes temporary session download folders after a specified time.
 - **Organized Downloads**: Downloads are structured by artist and album folders, maintaining organization across downloads.
+- **Job queue**: Downloads run through a bounded job queue instead of all firing off at once - extra requests wait their turn instead of piling up. Admins get a live queue panel (in the Admin controls) to see every job's status and remove a queued job or kill a running one; anyone can cancel the download they just started with the **Cancel Download** button. A job keeps running even if you close the tab - reopen `/jobs/<id>/stream` (the id is shown as the first SSE event) to watch it again.
 <!--- **Admin mode**: Allows the admin to specify a custom directory for downloads.
 -->
 ## Prerequisites
@@ -70,6 +71,7 @@ services:
 
 - `CLEANUP_INTERVAL`: (Optional) Sets the cleanup interval for session-based download folders (both ZIPs and single tracks). Defaults to `300` seconds (5 minutes). Stale folders older than this are also safely swept periodically by a backup job.
 - `DOWNLOAD_STALL_TIMEOUT`: (Optional) Seconds of complete silence from `yt-dlp`/`spotdl` (no new log lines) before an in-progress download is aborted and reported as failed. Defaults to `300` (5 minutes). Guards against a hung download (e.g. a chapter-splitting step that gets stuck) blocking the request forever instead of surfacing an error.
+- `MAX_CONCURRENT_JOBS`: (Optional) How many downloads run at the same time. Defaults to `2`. Extra requests wait in the job queue until a slot frees up instead of all spawning `spotdl`/`yt-dlp` at once.
 - `CLEANUP_INTERVAL`: (Optional) How long a completed public download's ZIP/track stays available before its temporary folder is deleted. Defaults to `300` seconds (5 minutes).
 - `ADMIN_USERNAME` and `ADMIN_PASSWORD`: (Optional) Sets the login credentials for admin access.
 - `AUDIO_DOWNLOAD_PATH`: Sets the folder for admin-mode downloads. Files downloaded as an admin are stored here. This is set in your .env file.
