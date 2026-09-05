@@ -5,6 +5,7 @@ A self-hosted web application for downloading songs, albums, or playlists from S
 ## Features
 
 - **Download Spotify and YouTube playlists**: Automatically detects and processes playlists based on the URL.
+- **Chapter splitting for YouTube links**: If a YouTube video has chapters (e.g. a DJ mix or compilation upload), it's automatically split into one MP3 per chapter instead of downloaded as a single track. Videos without chapters download as before.
 - **Session-based download directories**: Isolates each user session to a unique download directory.
 - **Admin Mode**: Enables admin users to download directly to a specified folder on the server.
 - **Progress bar and download logs**: View download progress and logs in real-time via the web interface.

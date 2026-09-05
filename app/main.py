@@ -91,14 +91,23 @@ def download_media():
             spotify_link
         ])
     else:
-        command = ['yt-dlp', '-x', '--audio-format', 'mp3']
+        # Chapters (e.g. DJ mixes, compilation uploads) split into one file
+        # per track via ffmpeg. Videos with no chapters produce only the
+        # "default" file below - it's written to a sibling -raw folder and
+        # generate() moves it into temp_download_folder only if no chapter
+        # files showed up, so a single track still gets served normally.
+        raw_dir = f"{temp_download_folder}-raw"
+        os.makedirs(raw_dir, exist_ok=True)
+
+        command = ['yt-dlp', '-x', '--audio-format', 'mp3', '--split-chapters']
 
         ytdlp_extra_args_env = os.getenv('YTDLP_EXTRA_ARGS')
         if ytdlp_extra_args_env:
             command.extend(shlex.split(ytdlp_extra_args_env))
 
         command.extend([
-            '-o', f"{temp_download_folder}/%(uploader)s/%(album)s/%(title)s.%(ext)s",
+            '-o', f"{raw_dir}/%(uploader)s - %(title)s.%(ext)s",
+            '-o', f"chapter:{temp_download_folder}/%(uploader)s - %(title)s/%(section_number)03d - %(section_title)s.%(ext)s",
             spotify_link
         ])
 
@@ -128,6 +137,19 @@ def generate(is_admin, command, temp_download_folder, session_id):
         if process.returncode != 0:
             yield f"data: Error: Download exited with code {process.returncode}.\n\n"
             return
+
+        # Reconcile the yt-dlp -raw sibling folder (see download_media): if
+        # chapters were split into temp_download_folder, discard the raw
+        # whole-file copy; otherwise it's the only output, so promote it.
+        raw_dir = f"{temp_download_folder}-raw"
+        if os.path.isdir(raw_dir):
+            has_split_files = any(
+                files for _, _, files in os.walk(temp_download_folder)
+            )
+            if not has_split_files:
+                for name in os.listdir(raw_dir):
+                    shutil.move(os.path.join(raw_dir, name), os.path.join(temp_download_folder, name))
+            shutil.rmtree(raw_dir, ignore_errors=True)
 
         # Gather all downloaded audio files
         downloaded_files = []
