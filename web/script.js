@@ -38,7 +38,6 @@ async function download() {
 
             downloadLink.innerText = "Click to download your file";
             document.getElementById('result').appendChild(downloadLink);
-            downloadLink.click();
 
             // Close the EventSource and hide the progress bar
             eventSource.close();
