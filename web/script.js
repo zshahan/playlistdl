@@ -45,6 +45,13 @@ async function download() {
         } else if (log.includes("Download completed") || log.includes("Download process completed successfully")) {
             // Show a success message in logs
             logsElement.innerHTML += "Download completed successfully.<br>";
+            progressBar.value = 100;
+
+            // Close the EventSource now - otherwise the browser treats the
+            // server ending the stream as a dropped connection and silently
+            // reconnects, kicking off a duplicate download.
+            eventSource.close();
+            progressBar.style.display = 'none';
         } else if (log.startsWith("Error")) {
             // Display error message and close EventSource
             document.getElementById('result').innerText = `Error: ${log}`;
