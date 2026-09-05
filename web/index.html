@@ -21,11 +21,22 @@
 
         <!-- Progress bar -->
         <progress id="progress" value="0" max="100" style="display:none;"></progress>
+        <button id="cancelButton" onclick="cancelDownload()" style="display:none;">Cancel Download</button>
 	<div id="adminControls" style="display:none;">
 	    <select id="downloadPathSelect" onchange="handlePathSelectChange()" style="display:none;"></select>
     	    <input type="text" id="downloadPath" placeholder="Enter server download path">
     	    <button id="setPathButton" onclick="setDownloadPath()">Set Download Path</button>
     	    <div id="pathMessage"></div>
+
+	    <div id="jobQueueSection">
+	        <h3>Job Queue</h3>
+	        <table id="jobQueueTable">
+	            <thead>
+	                <tr><th>Link</th><th>Status</th><th>Started</th><th></th></tr>
+	            </thead>
+	            <tbody></tbody>
+	        </table>
+	    </div>
 	</div>
 
         <div id="result"></div>
