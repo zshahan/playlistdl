@@ -36,6 +36,8 @@ services:
       - AUDIO_DOWNLOAD_PATH=${AUDIO_DOWNLOAD_PATH}  # Use the env variable
       - CLEANUP_INTERVAL=300  # Optional
       - DOWNLOAD_OPTIONS=${DOWNLOAD_OPTIONS:-}  # Optional: Comma-separated options
+      - PUID=${PUID:-0}  # Optional: your host user's uid (`id -u`)
+      - PGID=${PGID:-0}  # Optional: your host user's gid (`id -g`)
     volumes:
       - ${AUDIO_DOWNLOAD_PATH}:${AUDIO_DOWNLOAD_PATH}  # Reference env variable here as well
 
@@ -66,10 +68,11 @@ services:
 
 ### Environment Variables
 
-- `CLEANUP_INTERVAL`: (Optional) Sets the cleanup interval for session-based download folders (both ZIPs and single tracks). Defaults to `300` seconds (5 minutes). Stale folders older than this are also safely swept periodically by a backup job.
+- `CLEANUP_INTERVAL`: (Optional) How long a completed public download's ZIP/track stays available before its temporary folder is deleted. Defaults to `300` seconds (5 minutes).
 - `ADMIN_USERNAME` and `ADMIN_PASSWORD`: (Optional) Sets the login credentials for admin access.
 - `AUDIO_DOWNLOAD_PATH`: Sets the folder for admin-mode downloads. Files downloaded as an admin are stored here. This is set in your .env file.
 - `DOWNLOAD_OPTIONS`: (Optional) A comma-separated list of folders for the Admin dropdown (e.g. `Pop:/media/...,Rock:/media/...`). Can contain `Label:Path` pairs or simple paths.
+- `PUID` and `PGID`: (Optional) Defaults to `0`/`0` (root), matching prior behavior. Set these to a non-root uid/gid (e.g. your host user's, via `id -u`/`id -g`) and the app runs as that user, so files it writes into the mounted download path come out already owned by it instead of root - useful if another system needs to read them without you first running `chown`/`chmod`.
 - `SPOTDL_AUDIO_PROVIDERS`: (Optional) Sets the audio provider(s) for spotDL (e.g. `piped`, `youtube`, `soundcloud`, `bandcamp`, `youtube-music`). Space-separated list. If you get blocked by YouTube Music, set this to `piped` or `youtube`.
 - `SPOTDL_EXTRA_ARGS`: (Optional) Extra command-line arguments to pass to `spotdl` (e.g. `--dont-filter-results` to disable strict metadata/title matching filters).
 - `YTDLP_EXTRA_ARGS`: (Optional) Extra command-line arguments to pass to `yt-dlp` for direct YouTube links (e.g. `--extractor-args "youtube:player_client=default,mweb"` as a workaround if YouTube breaks extraction again before the next image rebuild). Parsed with shell-style quoting, so arguments containing spaces must be quoted.
@@ -90,7 +93,7 @@ services:
 
 ## Troubleshooting
 
-- **Permissions**: Ensure the `downloads` directory has the correct permissions for Docker to write files.
+- **Permissions**: Ensure the `downloads` directory has the correct permissions for Docker to write files. If files land owned by root and another system can't read them without a manual `chown`/`chmod`, set `PUID`/`PGID` (see Environment Variables) to the uid/gid that system expects.
 - **Port Conflicts**: If port 5000 is in use, adjust the port mapping in the `docker-compose.yaml` file.
 - **YouTube downloads failing (e.g. "The page needs to be reloaded")**: This means `yt-dlp` has fallen behind a YouTube change. The image is rebuilt weekly (and on every push to `master`) with `yt-dlp` forced to its latest release, so `docker compose pull && docker compose up -d` usually resolves it. Check `docker logs playlistdl` at startup for the `[startup] yt-dlp version: ...` line to confirm what's actually running. If YouTube breaks something yt-dlp hasn't shipped a fix for yet, `YTDLP_EXTRA_ARGS` (see Environment Variables) lets you try a workaround without rebuilding.
 
